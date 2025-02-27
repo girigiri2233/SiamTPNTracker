@@ -23,16 +23,32 @@ def ltr_collate(batch):
     elem_type = type(batch[0])
     if isinstance(batch[0], torch.Tensor):
         out = None
+
         if _check_use_shared_memory():
-            # If we're in a background process, concatenate directly into a
-            # shared memory tensor to avoid an extra copy
-            numel = sum([x.numel() for x in batch])
-            storage = batch[0].storage()._new_shared(numel)
-            out = batch[0].new(storage)
-        return torch.stack(batch, 0, out=out)
+            # 动态计算目标形状
+            sample_shape = list(batch[0].shape)
+            stack_dim = 1  # 当前函数为 stack_dim=1
+            # 构建目标形状 (e.g. [32, batch_size, 3, 320, 320])
+            target_shape = sample_shape[:stack_dim] + [len(batch)] + sample_shape[stack_dim:]
+            
+            # 创建符合目标形状的共享内存张量
+            storage = batch[0].storage()._new_shared(len(batch) * batch[0].numel())
+            out = batch[0].new(storage).resize_(target_shape)  # 关键修改：显式设置形状
+        
+        return torch.stack(batch, stack_dim, out=out)  # 保持原有堆叠逻辑
+    
+        #原代碼
+        # if _check_use_shared_memory():
+        #     # If we're in a background process, concatenate directly into a
+        #     # shared memory tensor to avoid an extra copy
+        #     numel = sum([x.numel() for x in batch])
+        #     storage = batch[0].storage()._new_shared(numel)
+        #     out = batch[0].new(storage)
+        # return torch.stack(batch, 0, out=out)
         # if batch[0].dim() < 4:
         #     return torch.stack(batch, 0, out=out)
         # return torch.cat(batch, 0, out=out)
+
     elif elem_type.__module__ == 'numpy' and elem_type.__name__ != 'str_' \
             and elem_type.__name__ != 'string_':
         elem = batch[0]
@@ -69,18 +85,37 @@ def ltr_collate(batch):
 
 def ltr_collate_stack1(batch):
     """Puts each data field into a tensor. The tensors are stacked at dim=1 to form the batch"""
-
+    
     error_msg = "batch must contain tensors, numbers, dicts or lists; found {}"
     elem_type = type(batch[0])
     if isinstance(batch[0], torch.Tensor):
         out = None
+
         if _check_use_shared_memory():
-            # If we're in a background process, concatenate directly into a
-            # shared memory tensor to avoid an extra copy
-            numel = sum([x.numel() for x in batch])
-            storage = batch[0].storage()._new_shared(numel)
-            out = batch[0].new(storage)
-        return torch.stack(batch, 1, out=out)
+            # ============== 核心修改开始 ============== #
+            # 获取样本形状 (e.g. [32, 3, 320, 320])
+            sample_shape = list(batch[0].shape)
+            # 计算目标形状 (e.g. [32, batch_size, 3, 320, 320])
+            target_shape = sample_shape[:1] + [len(batch)] + sample_shape[1:]
+            
+            # 创建符合目标形状的共享内存张量
+            total_elements = len(batch) * batch[0].numel()
+            storage = batch[0].untyped_storage()._new_shared(total_elements)  # 核心修改点
+            
+            out = torch.cat([t.contiguous().view(-1, *t.shape[2:]) for t in batch], 0)
+            out = out.view(target_shape)
+            # ============== 核心修改结束 ============== #
+            
+        return torch.stack(batch, 1, out=out)  # 保持堆叠维度为1
+        
+        #源代碼
+        # if _check_use_shared_memory():
+        #     # If we're in a background process, concatenate directly into a
+        #     # shared memory tensor to avoid an extra copy
+        #     numel = sum([x.numel() for x in batch])
+        #     storage = batch[0].storage()._new_shared(numel)
+        #     out = batch[0].new(storage)
+        # return torch.stack(batch, 1, out=out)
         # if batch[0].dim() < 4:
         #     return torch.stack(batch, 0, out=out)
         # return torch.cat(batch, 0, out=out)
@@ -100,7 +135,7 @@ def ltr_collate_stack1(batch):
         return torch.LongTensor(batch)
     elif isinstance(batch[0], float):
         return torch.DoubleTensor(batch)
-    elif isinstance(batch[0], six.string_classes):
+    elif isinstance(batch[0], (str, bytes)):
         return batch
     elif isinstance(batch[0], TensorDict):
         return TensorDict({key: ltr_collate_stack1([d[key] for d in batch]) for key in batch[0]})
